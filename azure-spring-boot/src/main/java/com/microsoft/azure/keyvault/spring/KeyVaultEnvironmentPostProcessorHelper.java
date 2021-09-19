@@ -3,70 +3,113 @@
  * Licensed under the MIT License. See LICENSE in the project root for
  * license information.
  */
-
 package com.microsoft.azure.keyvault.spring;
 
-import com.microsoft.azure.AzureEnvironment;
-import com.microsoft.azure.AzureResponseBuilder;
-import com.microsoft.azure.credentials.MSICredentials;
-import com.microsoft.azure.keyvault.KeyVaultClient;
-import com.microsoft.azure.serializer.AzureJacksonAdapter;
-import com.microsoft.azure.spring.support.UserAgent;
-import com.microsoft.azure.telemetry.TelemetryData;
-import com.microsoft.azure.telemetry.TelemetryProxy;
-import com.microsoft.rest.RestClient;
-import com.microsoft.azure.credentials.AppServiceMSICredentials;
-import com.microsoft.rest.credentials.ServiceClientCredentials;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.azure.core.credential.TokenCredential;
+import com.azure.core.http.policy.HttpLogOptions;
+import com.azure.identity.ClientCertificateCredentialBuilder;
+import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.identity.ManagedIdentityCredentialBuilder;
+import com.azure.security.keyvault.secrets.SecretClient;
+import com.azure.security.keyvault.secrets.SecretClientBuilder;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_ALLOW_TELEMETRY;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_CERTIFICATE_PASSWORD;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_CERTIFICATE_PATH;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_CLIENT_ID;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_CLIENT_KEY;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_PREFIX;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_REFRESH_INTERVAL;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_SECRET_KEYS;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_TENANT_ID;
+import static com.microsoft.azure.keyvault.spring.Constants.AZURE_KEYVAULT_VAULT_URI;
+import static com.microsoft.azure.keyvault.spring.Constants.DEFAULT_REFRESH_INTERVAL_MS;
+import static com.microsoft.azure.keyvault.spring.Constants.SPRINGBOOT_KEY_VAULT_APPLICATION_ID;
+import com.microsoft.azure.telemetry.TelemetrySender;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
+import static com.microsoft.azure.telemetry.TelemetryData.SERVICE_NAME;
+import static com.microsoft.azure.telemetry.TelemetryData.getClassPackageSimpleName;
+
+@Slf4j
 class KeyVaultEnvironmentPostProcessorHelper {
-    private static final Logger LOG = LoggerFactory.getLogger(KeyVaultEnvironmentPostProcessorHelper.class);
 
     private final ConfigurableEnvironment environment;
-    private final TelemetryProxy telemetryProxy;
 
     public KeyVaultEnvironmentPostProcessorHelper(final ConfigurableEnvironment environment) {
         this.environment = environment;
-        this.telemetryProxy = new TelemetryProxy(this.allowTelemetry(environment));
+        // As @PostConstructor not available when post processor, call it explicitly.
+        sendTelemetry();
     }
 
-    public void addKeyVaultPropertySource() {
-        final String vaultUri = getProperty(this.environment, Constants.AZURE_KEYVAULT_VAULT_URI);
+    /**
+     * Add a key vault property source.
+     *
+     * <p>
+     * The normalizedName is used to target a specific key vault (note if the
+     * name is the empty string it works as before with only one key vault
+     * present). The normalized name is the name of the specific key vault plus
+     * a trailing "." at the end.
+     * </p>
+     *
+     * @param normalizedName the normalized name.
+     */
+    public void addKeyVaultPropertySource(String normalizedName) {
+        final String vaultUri = getProperty(this.environment, 
+                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_VAULT_URI);
         final Long refreshInterval = Optional.ofNullable(
-                this.environment.getProperty(Constants.AZURE_KEYVAULT_REFRESH_INTERVAL))
-                .map(Long::valueOf).orElse(Constants.DEFAULT_REFRESH_INTERVAL_MS);
-        final ServiceClientCredentials credentials = getCredentials();
+                this.environment.getProperty(
+                        AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_REFRESH_INTERVAL))
+                .map(Long::valueOf).orElse(DEFAULT_REFRESH_INTERVAL_MS);
+        final Binder binder = Binder.get(this.environment);
+        final List<String> secretKeys = binder.bind(
+                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_SECRET_KEYS, Bindable.listOf(String.class))
+                .orElse(Collections.emptyList());
 
-        final RestClient restClient = new RestClient.Builder().withBaseUrl(vaultUri)
-                .withCredentials(credentials)
-                .withSerializerAdapter(new AzureJacksonAdapter())
-                .withResponseBuilderFactory(new AzureResponseBuilder.Factory())
-                .withUserAgent(UserAgent.getUserAgent(Constants.AZURE_KEYVAULT_USER_AGENT,
-                        allowTelemetry(this.environment)))
-                .build();
-
-        final KeyVaultClient kvClient = new KeyVaultClient(restClient);
-
-        this.trackCustomEvent();
-
+        final TokenCredential tokenCredential = getCredentials(normalizedName);
+        final SecretClient secretClient = new SecretClientBuilder()
+                .vaultUrl(vaultUri)
+                .credential(tokenCredential)
+                .httpLogOptions(new HttpLogOptions().setApplicationId(SPRINGBOOT_KEY_VAULT_APPLICATION_ID))
+                .buildClient();
         try {
             final MutablePropertySources sources = this.environment.getPropertySources();
-            final KeyVaultOperation kvOperation = new KeyVaultOperation(kvClient, vaultUri, refreshInterval);
+            final boolean caseSensitive = Boolean.parseBoolean(
+                    this.environment.getProperty(Constants.AZURE_KEYVAULT_CASE_SENSITIVE_KEYS, "false"));
+            final KeyVaultOperation kvOperation = new KeyVaultOperation(secretClient,
+                    vaultUri,
+                    refreshInterval,
+                    secretKeys,
+                    caseSensitive);
 
-            if (sources.contains(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME)) {
-                sources.addAfter(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                        new KeyVaultPropertySource(kvOperation));
+            if (normalizedName.equals("")) {
+                if (sources.contains(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME)) {
+                    sources.addAfter(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            new KeyVaultPropertySource(kvOperation));
+                } else {
+                    sources.addFirst(new KeyVaultPropertySource(kvOperation));
+                }
             } else {
-                sources.addFirst(new KeyVaultPropertySource(kvOperation));
+                if (sources.contains(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME)) {
+                    sources.addAfter(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            new KeyVaultPropertySource(normalizedName, kvOperation));
+                } else {
+                    sources.addFirst(new KeyVaultPropertySource(normalizedName, kvOperation));
+                }
             }
 
         } catch (final Exception ex) {
@@ -74,37 +117,90 @@ class KeyVaultEnvironmentPostProcessorHelper {
         }
     }
 
-    ServiceClientCredentials getCredentials() {
-        if (this.environment.containsProperty("MSI_ENDPOINT")
-                && this.environment.containsProperty("MSI_SECRET")) {
-            LOG.debug("Will use MSI credentials for app services");
-            final String msiEndpoint = getProperty(this.environment, "MSI_ENDPOINT");
-            final String msiSecret = getProperty(this.environment, "MSI_SECRET");
-            return new AppServiceMSICredentials(AzureEnvironment.AZURE, msiEndpoint, msiSecret);
-        } else if (this.environment.containsProperty(Constants.AZURE_CLIENTID)
-                && this.environment.containsProperty(Constants.AZURE_CLIENTKEY)) {
-            LOG.debug("Will use custom credentials");
-            final long timeAcquiringTimeoutInSeconds = this.environment.getProperty(
-                    Constants.AZURE_TOKEN_ACQUIRE_TIMEOUT_IN_SECONDS, Long.class, Constants.TOKEN_ACQUIRE_TIMEOUT_SECS);
-            final String clientId = getProperty(this.environment, Constants.AZURE_CLIENTID);
-            final String clientKey = getProperty(this.environment, Constants.AZURE_CLIENTKEY);
-            return new AzureKeyVaultCredential(clientId, clientKey, timeAcquiringTimeoutInSeconds);
-        } else if (this.environment.containsProperty(Constants.AZURE_CLIENTID)) {
-            LOG.debug("Will use MSI credentials for VMs with specified clientId");
-            final String clientId = getProperty(this.environment, Constants.AZURE_CLIENTID);
-            return new MSICredentials(AzureEnvironment.AZURE).withClientId(clientId);
-        } else {
-            LOG.debug("Will use MSI credentials for VM");
-            return new MSICredentials(AzureEnvironment.AZURE);
+    /**
+     * Get the token credentials.
+     *
+     * @return the token credentials.
+     */
+    public TokenCredential getCredentials() {
+        return getCredentials("");
+    }
+
+    /**
+     * Get the token credentials.
+     *
+     * @param normalizedName the normalized name of the key vault.
+     * @return the token credentials.
+     */
+    public TokenCredential getCredentials(String normalizedName) {
+        //use service principle to authenticate
+        if (this.environment.containsProperty(
+                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID)
+                && this.environment.containsProperty(
+                        AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_KEY)
+                && this.environment.containsProperty(
+                        AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_TENANT_ID)) {
+            log.debug("Will use custom credentials");
+            final String clientId = getProperty(this.environment, 
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID);
+            final String clientKey = getProperty(this.environment,
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_KEY);
+            final String tenantId = getProperty(this.environment, 
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_TENANT_ID);
+            final ClientSecretCredential clientSecretCredential = new ClientSecretCredentialBuilder()
+                    .clientId(clientId)
+                    .clientSecret(clientKey)
+                    .tenantId(tenantId)
+                    .build();
+            return clientSecretCredential;
         }
+        //use certificate to authenticate
+        if (this.environment.containsProperty(
+                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID)
+                && this.environment.containsProperty(
+                        AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CERTIFICATE_PATH)
+                && this.environment.containsProperty(
+                        AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_TENANT_ID)) {
+            // Password can be empty
+            final String certPwd = this.environment.getProperty(
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CERTIFICATE_PASSWORD);
+            final String certPath = getProperty(this.environment,
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CERTIFICATE_PATH);
+
+            if (StringUtils.isEmpty(certPwd)) {
+                return new ClientCertificateCredentialBuilder()
+                        .tenantId(getProperty(this.environment, 
+                                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_TENANT_ID))
+                        .clientId(getProperty(this.environment, 
+                                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID))
+                        .pemCertificate(certPath)
+                        .build();
+            } else {
+                return new ClientCertificateCredentialBuilder()
+                        .tenantId(getProperty(this.environment, 
+                                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_TENANT_ID))
+                        .clientId(getProperty(this.environment, 
+                                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID))
+                        .pfxCertificate(certPath, certPwd)
+                        .build();
+            }
+        }
+        //use MSI to authenticate
+        if (this.environment.containsProperty(
+                AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID)) {
+            log.debug("Will use MSI credentials with specified clientId");
+            final String clientId = getProperty(this.environment, 
+                    AZURE_KEYVAULT_PREFIX + normalizedName + AZURE_KEYVAULT_CLIENT_ID);
+            return new ManagedIdentityCredentialBuilder().clientId(clientId).build();
+        }
+        log.debug("Will use MSI credentials");
+        return new ManagedIdentityCredentialBuilder().build();
     }
 
     private String getProperty(final ConfigurableEnvironment env, final String propertyName) {
         Assert.notNull(env, "env must not be null!");
         Assert.notNull(propertyName, "propertyName must not be null!");
-
         final String property = env.getProperty(propertyName);
-
         if (property == null || property.isEmpty()) {
             throw new IllegalArgumentException("property " + propertyName + " must not be null");
         }
@@ -113,15 +209,17 @@ class KeyVaultEnvironmentPostProcessorHelper {
 
     private boolean allowTelemetry(final ConfigurableEnvironment env) {
         Assert.notNull(env, "env must not be null!");
-
-        return env.getProperty(Constants.AZURE_KEYVAULT_ALLOW_TELEMETRY, Boolean.class, true);
+        return env.getProperty(AZURE_KEYVAULT_PREFIX + AZURE_KEYVAULT_ALLOW_TELEMETRY, Boolean.class, true);
     }
 
-    private void trackCustomEvent() {
-        final HashMap<String, String> customTelemetryProperties = new HashMap<>();
-        customTelemetryProperties.put(TelemetryData.SERVICE_NAME, "keyvault");
+    private void sendTelemetry() {
+        if (allowTelemetry(environment)) {
+            final Map<String, String> events = new HashMap<>();
+            final TelemetrySender sender = new TelemetrySender();
 
-        final String className = ClassUtils.getUserClass(this.getClass()).getSimpleName();
-        this.telemetryProxy.trackEvent(className, customTelemetryProperties);
+            events.put(SERVICE_NAME, getClassPackageSimpleName(KeyVaultEnvironmentPostProcessorHelper.class));
+
+            sender.send(ClassUtils.getUserClass(getClass()).getSimpleName(), events);
+        }
     }
 }

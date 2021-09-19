@@ -7,6 +7,12 @@ package com.microsoft.azure.spring.autoconfigure.b2c;
 
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
+  <<<<<<< release/2.3.2
+import org.springframework.util.Assert;
+
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+  =======
 import lombok.NonNull;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -21,10 +27,56 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
+  >>>>>>> aad-b2c-integration
 
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 public class AADB2CURL {
 
+  <<<<<<< release/2.3.2
+    private static final String AUTHORIZATION_URL_PATTERN =
+            "https://%s.b2clogin.com/%s.onmicrosoft.com/oauth2/v2.0/authorize";
+
+    private static final String TOKEN_URL_PATTERN =
+            "https://%s.b2clogin.com/%s.onmicrosoft.com/oauth2/v2.0/token?p=%s";
+
+    private static final String JWKSET_URL_PATTERN =
+            "https://%s.b2clogin.com/%s.onmicrosoft.com/discovery/v2.0/keys?p=%s";
+
+    private static final String END_SESSION_URL_PATTERN =
+            "https://%s.b2clogin.com/%s.onmicrosoft.com/oauth2/v2.0/logout?post_logout_redirect_uri=%s&p=%s";
+
+    public static String getAuthorizationUrl(String tenant) {
+        Assert.hasText(tenant, "tenant should have text.");
+
+        return String.format(AUTHORIZATION_URL_PATTERN, tenant, tenant);
+    }
+
+    public static String getTokenUrl(String tenant, String userFlow) {
+        Assert.hasText(tenant, "tenant should have text.");
+        Assert.hasText(userFlow, "user flow should have text.");
+
+        return String.format(TOKEN_URL_PATTERN, tenant, tenant, userFlow);
+    }
+
+    public static String getJwkSetUrl(String tenant, String userFlow) {
+        Assert.hasText(tenant, "tenant should have text.");
+        Assert.hasText(userFlow, "user flow should have text.");
+
+        return String.format(JWKSET_URL_PATTERN, tenant, tenant, userFlow);
+    }
+
+    public static String getEndSessionUrl(String tenant, String logoutUrl, String userFlow) {
+        Assert.hasText(tenant, "tenant should have text.");
+        Assert.hasText(logoutUrl, "logoutUrl should have text.");
+        Assert.hasText(userFlow, "user flow should have text.");
+
+        return String.format(END_SESSION_URL_PATTERN, tenant, tenant, getEncodedURL(logoutUrl), userFlow);
+    }
+
+    private static String getEncodedURL(String url) {
+        Assert.hasText(url, "url should have text.");
+
+  =======
     public static final String PARAMETER_CODE = "code";
 
     public static final String PARAMETER_ID_TOKEN = "id_token";
@@ -71,12 +123,15 @@ public class AADB2CURL {
     }
 
     private static String getEncodedURL(@NonNull String url) {
+  >>>>>>> aad-b2c-integration
         try {
             return URLEncoder.encode(url, "utf-8");
         } catch (UnsupportedEncodingException e) {
             throw new AADB2CConfigurationException("failed to encode url: " + url, e);
         }
     }
+  <<<<<<< release/2.3.2
+  =======
 
     public static String toAbsoluteURL(String url, @NonNull HttpServletRequest request) {
         try {
@@ -242,4 +297,5 @@ public class AADB2CURL {
             throw new AADB2CAuthenticationException("Authentication failure: " + message);
         }
     }
+  >>>>>>> aad-b2c-integration
 }

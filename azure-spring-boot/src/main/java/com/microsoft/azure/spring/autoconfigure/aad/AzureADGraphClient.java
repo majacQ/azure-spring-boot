@@ -7,11 +7,18 @@ package com.microsoft.azure.spring.autoconfigure.aad;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.microsoft.aad.adal4j.AuthenticationContext;
-import com.microsoft.aad.adal4j.AuthenticationResult;
-import com.microsoft.aad.adal4j.ClientCredential;
-import com.microsoft.aad.adal4j.UserAssertion;
+import com.microsoft.aad.msal4j.ClientCredentialFactory;
+import com.microsoft.aad.msal4j.ConfidentialClientApplication;
+import com.microsoft.aad.msal4j.IAuthenticationResult;
+import com.microsoft.aad.msal4j.IClientCredential;
+import com.microsoft.aad.msal4j.MsalServiceException;
+import com.microsoft.aad.msal4j.OnBehalfOfParameters;
+import com.microsoft.aad.msal4j.UserAssertion;
 import com.nimbusds.oauth2.sdk.http.HTTPResponse;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 
@@ -20,42 +27,65 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.ExecutionException;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
+@Slf4j
 public class AzureADGraphClient {
     private static final SimpleGrantedAuthority DEFAULT_AUTHORITY = new SimpleGrantedAuthority("ROLE_USER");
-    private static final String DEFAULE_ROLE_PREFIX = "ROLE_";
-    private static final String REQUEST_ID_SUFFIX = "aadfeed5";
+    private static final String DEFAULT_ROLE_PREFIX = "ROLE_";
+    private static final String MICROSOFT_GRAPH_SCOPE = "https://graph.microsoft.com/user.read";
+    private static final String AAD_GRAPH_API_SCOPE = "https://graph.windows.net/user.read";
 
-    private String clientId;
-    private String clientSecret;
-    private List<String> aadTargetGroups;
-    private ServiceEndpoints serviceEndpoints;
+    private final String clientId;
+    private final String clientSecret;
+    private final ServiceEndpoints serviceEndpoints;
+    private final AADAuthenticationProperties aadAuthenticationProperties;
 
-    public AzureADGraphClient(ClientCredential clientCredential, AADAuthenticationProperties aadAuthProps,
+    private static final String V2_VERSION_ENV_FLAG = "v2-graph";
+    private boolean aadMicrosoftGraphApiBool;
+
+    public AzureADGraphClient(String clientId, String clientSecret, AADAuthenticationProperties aadAuthProps,
                               ServiceEndpointsProperties serviceEndpointsProps) {
-        this.clientId = clientCredential.getClientId();
-        this.clientSecret = clientCredential.getClientSecret();
-        this.aadTargetGroups = aadAuthProps.getActiveDirectoryGroups();
+        this.clientId = clientId;
+        this.clientSecret = clientSecret;
+        this.aadAuthenticationProperties = aadAuthProps;
         this.serviceEndpoints = serviceEndpointsProps.getServiceEndpoints(aadAuthProps.getEnvironment());
+
+        this.initAADMicrosoftGraphApiBool(aadAuthProps.getEnvironment());
+    }
+
+    private void initAADMicrosoftGraphApiBool(String endpointEnv) {
+        this.aadMicrosoftGraphApiBool = endpointEnv.contains(V2_VERSION_ENV_FLAG);
     }
 
     private String getUserMembershipsV1(String accessToken) throws IOException {
         final URL url = new URL(serviceEndpoints.getAadMembershipRestUri());
-
         final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         // Set the appropriate header fields in the request header.
-        conn.setRequestProperty("api-version", "1.6");
-        conn.setRequestProperty("Authorization", accessToken);
-        conn.setRequestProperty("Accept", "application/json;odata=minimalmetadata");
+
+        if (this.aadMicrosoftGraphApiBool) {
+            conn.setRequestMethod(HttpMethod.GET.toString());
+            conn.setRequestProperty(HttpHeaders.AUTHORIZATION,
+                                    String.format("Bearer %s", accessToken));
+            conn.setRequestProperty(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE);
+            conn.setRequestProperty(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE);
+        } else {
+            conn.setRequestMethod(HttpMethod.GET.toString());
+            conn.setRequestProperty("api-version", "1.6");
+            conn.setRequestProperty(HttpHeaders.AUTHORIZATION, accessToken);
+            conn.setRequestProperty(HttpHeaders.ACCEPT, "application/json;odata=minimalmetadata");
+        }
         final String responseInJson = getResponseStringFromConn(conn);
         final int responseCode = conn.getResponseCode();
         if (responseCode == HTTPResponse.SC_OK) {
@@ -91,16 +121,30 @@ public class AzureADGraphClient {
         final JsonNode valuesNode = rootNode.get("value");
 
         if (valuesNode != null) {
-            valuesNode.forEach(valueNode -> {
-                if (valueNode != null && valueNode.get("objectType").asText().equals("Group")) {
-                    final String objectID = valueNode.get("objectId").asText();
-                    final String displayName = valueNode.get("displayName").asText();
-                    lUserGroups.add(new UserGroup(objectID, displayName));
-                }
-            });
+            lUserGroups
+                    .addAll(StreamSupport.stream(valuesNode.spliterator(), false).filter(this::isMatchingUserGroupKey)
+                            .map(node -> {
+                                final String objectID = node.
+                                        get(aadAuthenticationProperties.getUserGroup().getObjectIDKey()).asText();
+                                final String displayName = node.get("displayName").asText();
+                                return new UserGroup(objectID, displayName);
+                            }).collect(Collectors.toList()));
+
         }
 
         return lUserGroups;
+    }
+
+    /**
+     * Checks that the JSON Node is a valid User Group to extract User Groups from
+     *
+     * @param node - json node to look for a key/value to equate against the
+     * {@link AADAuthenticationProperties.UserGroupProperties}
+     * @return true if the json node contains the correct key, and expected value to identify a user group.
+     */
+    private boolean isMatchingUserGroupKey(final JsonNode node) {
+        return node.get(aadAuthenticationProperties.getUserGroup().getKey()).asText()
+                .equals(aadAuthenticationProperties.getUserGroup().getValue());
     }
 
     public Set<GrantedAuthority> getGrantedAuthorities(String graphApiToken) throws IOException {
@@ -113,15 +157,15 @@ public class AzureADGraphClient {
 
 
     /**
-     * Converts UserGroup list to Set of GrantedAutorities
+     * Converts UserGroup list to Set of GrantedAuthorities
+     *
      * @param groups
      * @return
      */
     public Set<GrantedAuthority> convertGroupsToGrantedAuthorities(final List<UserGroup> groups) {
         // Map the authority information to one or more GrantedAuthority's and add it to mappedAuthorities
-        final Set<GrantedAuthority> mappedAuthorities = groups.stream()
-                .filter(group -> aadTargetGroups.contains(group.getDisplayName()))
-                .map(userGroup -> new SimpleGrantedAuthority(DEFAULE_ROLE_PREFIX + userGroup.getDisplayName()))
+        final Set<GrantedAuthority> mappedAuthorities = groups.stream().filter(this::isValidUserGroupToGrantAuthority)
+                .map(userGroup -> new SimpleGrantedAuthority(DEFAULT_ROLE_PREFIX + userGroup.getDisplayName()))
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         if (mappedAuthorities.isEmpty()) {
             mappedAuthorities.add(DEFAULT_AUTHORITY);
@@ -130,22 +174,55 @@ public class AzureADGraphClient {
         return mappedAuthorities;
     }
 
-    public AuthenticationResult acquireTokenForGraphApi(String idToken, String tenantId)
-            throws MalformedURLException, ServiceUnavailableException, InterruptedException, ExecutionException {
+    /**
+     * Determines if this is a valid {@link UserGroup} to build to a GrantedAuthority.
+     * <p>
+     * If the {@link AADAuthenticationProperties.UserGroupProperties#getAllowedGroups()} or the {@link
+     * AADAuthenticationProperties#getActiveDirectoryGroups()} contains the {@link UserGroup#getDisplayName()} return
+     * true.
+     *
+     * @param group - User Group to check if valid to grant an authority to.
+     * @return true if either of the allowed-groups or active-directory-groups contains the UserGroup display name
+     */
+    private boolean isValidUserGroupToGrantAuthority(final UserGroup group) {
+        return aadAuthenticationProperties.getUserGroup().getAllowedGroups().contains(group.getDisplayName())
+                || aadAuthenticationProperties.getActiveDirectoryGroups().contains(group.getDisplayName());
+    }
 
-        final ClientCredential credential = new ClientCredential(clientId, clientSecret);
+    public IAuthenticationResult acquireTokenForGraphApi(String idToken, String tenantId)
+            throws ServiceUnavailableException {
+        final IClientCredential clientCredential = ClientCredentialFactory.create(clientSecret);
         final UserAssertion assertion = new UserAssertion(idToken);
 
-        AuthenticationResult result = null;
+        IAuthenticationResult result = null;
         ExecutorService service = null;
         try {
             service = Executors.newFixedThreadPool(1);
-            final AuthenticationContext context = new AuthenticationContext(
-                    serviceEndpoints.getAadSigninUri() + tenantId + "/", true, service);
-            context.setCorrelationId(getCorrelationId());
-            final Future<AuthenticationResult> future = context
-                    .acquireToken(serviceEndpoints.getAadGraphApiUri(), assertion, credential, null);
+
+            final ConfidentialClientApplication application = ConfidentialClientApplication
+                    .builder(clientId, clientCredential)
+                    .authority(serviceEndpoints.getAadSigninUri() + tenantId + "/")
+                    .build();
+
+            final Set<String> scopes = new HashSet<>();
+            scopes.add(aadMicrosoftGraphApiBool ? MICROSOFT_GRAPH_SCOPE : AAD_GRAPH_API_SCOPE);
+
+            final OnBehalfOfParameters onBehalfOfParameters = OnBehalfOfParameters
+                    .builder(scopes, assertion)
+                    .build();
+
+            final CompletableFuture<IAuthenticationResult> future = application.acquireToken(onBehalfOfParameters);
             result = future.get();
+        } catch (Exception e) {
+            // handle conditional access policy
+            final Throwable cause = e.getCause();
+            if (cause instanceof MsalServiceException) {
+                final MsalServiceException exception = (MsalServiceException) cause;
+                if (exception.claims() != null && !exception.claims().isEmpty()) {
+                    throw exception;
+                }
+            }
+            log.error("acquire on behalf of token for graph api error", e);
         } finally {
             if (service != null) {
                 service.shutdown();
@@ -153,14 +230,8 @@ public class AzureADGraphClient {
         }
 
         if (result == null) {
-            throw new ServiceUnavailableException(
-                    "unable to acquire on-behalf-of token for client " + clientId);
+            throw new ServiceUnavailableException("unable to acquire on-behalf-of token for client " + clientId);
         }
         return result;
-    }
-
-    private static String getCorrelationId() {
-        final String uuid = UUID.randomUUID().toString();
-        return uuid.substring(0, uuid.length() - REQUEST_ID_SUFFIX.length()) + REQUEST_ID_SUFFIX;
     }
 }

@@ -1,6 +1,6 @@
-## Azure DocumentDB Spring Boot Starter
+## Azure Cosmos DB Spring Boot Starter
 
-[Azure DocumentDB](https://docs.microsoft.com/en-us/azure/cosmos-db/documentdb-introduction) helps manage JSON data through well-defined database resources. It is a key part of [Azure Cosmos DB](https://docs.microsoft.com/en-us/azure/cosmos-db/documentdb-introduction), which is a globally-distributed database service that allows developers to work with data using a variety of standard APIs, such as DocumentDB, MongoDB, Graph, and Table. 
+[Azure Cosmos DB](https://azure.microsoft.com/en-us/services/cosmos-db/) is a globally-distributed database service that allows developers to work with data using a variety of standard APIs, such as SQL, MongoDB, Graph, and Azure Table storage. 
 
 ## TOC
 
@@ -9,7 +9,7 @@
 * [Quick Start](#quick-start)
 
 ## Feature List
-- Spring Data CRUDRepository basic CRUD functionality
+- Spring Data ReactiveCrudRepository basic CRUD functionality
     - save
     - findAll
     - findOne by Id
@@ -35,14 +35,14 @@ Please refer to [sample project here](../../azure-spring-boot-samples/azure-cosm
 
 ### Add the dependency
 
-`azure-documentdb-spring-boot-starter` is published on Maven Central Repository.  
+`azure-cosmosdb-spring-boot-starter` is published on Maven Central Repository.  
 If you are using Maven, add the following dependency.  
 
 ```xml
 <dependency>
     <groupId>com.microsoft.azure</groupId>
-    <artifactId>azure-documentdb-spring-boot-starter</artifactId>
-    <version>2.0.5</version>
+    <artifactId>azure-cosmosdb-spring-boot-starter</artifactId>
+    <version>2.3.0</version>
 </dependency>
 ```
 
@@ -51,82 +51,111 @@ If you are using Maven, add the following dependency.
 Open `application.properties` file and add below properties with your Cosmos DB credentials.
 
 ```
-azure.cosmosdb.uri=your-documentdb-uri
-azure.cosmosdb.key=your-documentdb-key
-azure.cosmosdb.database=your-documentdb-databasename
+azure.cosmosdb.uri=your-cosmosdb-uri
+azure.cosmosdb.key=your-cosmosdb-key
+azure.cosmosdb.database=your-cosmosdb-databasename
 ```
 
 Property `azure.cosmosdb.consistency-level` is also supported.
 
+Property `azure.cosmosdb.cosmosKeyCredential` is also supported. CosmosKeyCredential feature provides capability to 
+rotate keys on the fly. You can switch keys using switchToSecondaryKey(). For more information on this, see the Sample 
+Application code.
+
 ### Define an entity
-Define a simple entity as Document in DocumentDB.
+Define a simple entity as Document in Cosmos DB.
 
 ```
 @Document(collection = "mycollection")
+@AllArgsConstructor
+@NoArgsConstructor
+@Getter
+@Setter
 public class User {
+    @Id
     private String id;
     private String firstName;
+    @PartitionKey
     private String lastName;
-    // if emailAddress is mapped to id, then
-    // @Id
-    // private String emailAddress
- 
-    ... // setters and getters
-
-    public User(String id, String firstName, String lastName) {
-        this.id = id;
-        this.firstName = firstName;
-        this.lastName = lastName;
-    }
+    private String address;
 
     @Override
     public String toString() {
-        return String.format("User: %s %s, %s", firstName, lastName);
+        return String.format("User: %s %s, %s", firstName, lastName, address);
     }
 }
 ```
 `id` field will be used as document `id` in Azure Cosmos DB. Or you can annotate any field with `@Id` to map it to document `id`.
 
-Annotation `@Document(collection="mycollection")` is used to specify collection name of your document in Azure Cosmos DB.
+Annotation `@Document(collection="mycollection")` is used to specify the collection name of your document in Azure Cosmos DB.
 
 ### Create repositories
-Extends DocumentDbRepository interface, which provides Spring Data repository support.
+Extends ReactiveCosmosRepository interface, which provides Spring Data repository support.
 
 ```
-import com.microsoft.azure.spring.data.cosmosdb.documentdb.repository.DocumentDbRepository;
+import com.microsoft.azure.spring.data.cosmosdb.repository.ReactiveCosmosRepository;
 import org.springframework.stereotype.Repository;
+import reactor.core.publisher.Flux;
 
 @Repository
-public interface UserRepository extends DocumentDbRepository<User, String> {
+public interface UserRepository extends ReactiveCosmosRepository<User, String> {
+
+    Flux<User> findByFirstName(String firstName);
 }
 ```
 
-So far DocumentDbRepository provides basic save, delete and find operations. More operations will be supported later.
+So far ReactiveCosmosRepository provides basic save, delete and find operations. More operations will be supported later.
 
 ### Create an Application class
 Here create an application class with all the components
 ```
 @SpringBootApplication
-public class SampleApplication implements CommandLineRunner {
+public class CosmosSampleApplication implements CommandLineRunner {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(CosmosSampleApplication.class);
 
     @Autowired
     private UserRepository repository;
 
     public static void main(String[] args) {
-        SpringApplication.run(SampleApplication.class, args);
+        SpringApplication.run(CosmosSampleApplication.class, args);
     }
 
     public void run(String... var1) throws Exception {
+        final User testUser = new User("testId", "testFirstName", "testLastName", "test address line one");
 
-        final User testUser = new User("testId", "testFirstName", "testLastName");
+        // Save the User class to Azure CosmosDB database.
+        final Mono<User> saveUserMono = repository.save(testUser);
 
-        repository.deleteAll();
-        repository.save(testUser);
+        final Flux<User> firstNameUserFlux = repository.findByFirstName("testFirstName");
 
-        final User result = repository.findOne(testUser.getId());
-        // if emailAddress is mapped to id, then 
-        // final User result = respository.findOne(testUser.getEmailAddress());        
+        //  Nothing happens until we subscribe to these Monos.
+        //  findById will not return the user as user is not present.
+        final Mono<User> findByIdMono = repository.findById(testUser.getId());
+        final User findByIdUser = findByIdMono.block();
+        Assert.isNull(findByIdUser, "User must be null");   
+
+        final User savedUser = saveUserMono.block();     
+        Assert.state(savedUser != null, "Saved user must not be null");
+        Assert.state(savedUser.getFirstName().equals(testUser.getFirstName()), "Saved user first name doesn't match");
+
+        final List<User> users = firstNameUserFlux.collectList().block();
+
+        final Optional<User> optionalUserResult = repository.findById(testUser.getId()).blockOptional();
+        Assert.isTrue(optionalUserResult.isPresent(), "Cannot find user.");
+        
+        final User result = optionalUserResult.get();
+        Assert.state(result.getFirstName().equals(testUser.getFirstName()), "query result firstName doesn't match!");
+        Assert.state(result.getLastName().equals(testUser.getLastName()), "query result lastName doesn't match!");
+
+        LOGGER.info("findOne in User collection get result: {}", result.toString());
     }
+
+    @PostConstruct
+        public void setup() {
+        // For this example, remove all of the existing records.
+        this.repository.deleteAll().block();
+    }   
 }
 ```
 Autowired UserRepository interface, then can do save, delete and find operations.
@@ -136,10 +165,11 @@ Microsoft would like to collect data about how users use this Spring boot starte
 ```
 azure.cosmosdb.allow-telemetry=false
 ```
+When telemetry is enabled, an HTTP request will be sent to URL `https://dc.services.visualstudio.com/v2/track`. So please make sure it's not blocked by your firewall.  
 Find more information about Azure Service Privacy Statement, please check [Microsoft Online Services Privacy Statement](https://www.microsoft.com/en-us/privacystatement/OnlineServices/Default.aspx). 
 
 ### Further info
 
-Besides using this Azure DocumentDB Spring Boot Starter, you can directly use Spring Data for Azure DocumentDB package for more complex scenarios. Please refer to [Spring Data for Azure DocumentDB](https://github.com/Microsoft/spring-data-documentdb) for more details.
+Besides using this Azure CosmosDb Spring Boot Starter, you can directly use Spring Data for Azure CosmosDb package for more complex scenarios. Please refer to [Spring Data for Azure CosmosDB](https://github.com/Microsoft/spring-data-cosmosdb) for more details.
 
 

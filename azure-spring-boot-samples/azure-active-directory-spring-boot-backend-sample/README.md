@@ -67,16 +67,17 @@ azure.activedirectory.active-directory-groups=group1, group2
 
 ### FAQ
 
-#### If registered application is not multi-tananted, how to run this sample?
+#### If registered application is not multi-tenanted, how to run this sample?
 In this auto-configuration, by [default](https://github.com/Microsoft/azure-spring-boot/blob/master/azure-spring-boot/src/main/resources/aad-oauth2-common.properties#L1-L4) `/common` is used for the tenant value. According to [Active Directory Sign In Request format](https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-protocols-openid-connect-code#send-the-sign-in-request), if your application is not multi-tenanted, you have to configure a tenant specific authorization endpoints.
 
 Configure endpoints with specific tenant-id by replacing `common` in your application.properties file:
 ```properties
-spring.security.oauth2.client.provider.azure-oauth-provider.authorization-uri=https://login.microsoftonline.com/{your-tenant-id}/oauth2/authorize
-spring.security.oauth2.client.provider.azure-oauth-provider.token-uri=https://login.microsoftonline.com/{your-tenant-id}/oauth2/token
-spring.security.oauth2.client.provider.azure-oauth-provider.user-info-uri=https://login.microsoftonline.com/{your-tenant-id}/openid/userinfo
-spring.security.oauth2.client.provider.azure-oauth-provider.jwk-set-uri=https://login.microsoftonline.com/{your-tenant-id}/discovery/keys
+spring.security.oauth2.client.provider.azure.authorization-uri=https://login.microsoftonline.com/{your-tenant-id}/oauth2/authorize
+spring.security.oauth2.client.provider.azure.token-uri=https://login.microsoftonline.com/{your-tenant-id}/oauth2/token
+spring.security.oauth2.client.provider.azure.user-info-uri=https://login.microsoftonline.com/{your-tenant-id}/openid/userinfo
+spring.security.oauth2.client.provider.azure.jwk-set-uri=https://login.microsoftonline.com/{your-tenant-id}/discovery/keys
 ```
 
 #### Meet with `AADSTS240002: Input id_token cannot be used as 'urn:ietf:params:oauth:grant-type:jwt-bearer' grant` error.
-In Azure portal, app registration manifest page, configure `oauth2AllowImplicitFlow` in your application manifest to `true`. 
+In Azure portal, app registration manifest page, configure `oauth2AllowImplicitFlow` in your application manifest to `true`. See [this issue](https://github.com/MicrosoftDocs/azure-docs/issues/8121#issuecomment-387090099) for details on this workaround.
+
