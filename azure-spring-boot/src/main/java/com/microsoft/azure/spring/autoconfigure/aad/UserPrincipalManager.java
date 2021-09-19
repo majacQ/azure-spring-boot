@@ -8,6 +8,7 @@ package com.microsoft.azure.spring.autoconfigure.aad;
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSObject;
+import com.nimbusds.jose.jwk.source.JWKSetCache;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.jwk.source.RemoteJWKSet;
 import com.nimbusds.jose.proc.BadJOSEException;
@@ -15,16 +16,22 @@ import com.nimbusds.jose.proc.JWSKeySelector;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jose.util.ResourceRetriever;
+import com.nimbusds.jwt.JWT;
 import com.nimbusds.jwt.JWTClaimsSet;
-import com.nimbusds.jwt.proc.*;
-import java.util.HashSet;
-import java.util.Optional;
-import java.util.Set;
+import com.nimbusds.jwt.JWTParser;
+import com.nimbusds.jwt.proc.BadJWTException;
+import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
+import com.nimbusds.jwt.proc.DefaultJWTClaimsVerifier;
+import com.nimbusds.jwt.proc.DefaultJWTProcessor;
+import com.nimbusds.jwt.proc.JWTClaimsSetVerifier;
 import lombok.extern.slf4j.Slf4j;
 
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.text.ParseException;
+import java.util.HashSet;
+import java.util.Optional;
+import java.util.Set;
 
 @Slf4j
 public class UserPrincipalManager {
@@ -78,6 +85,40 @@ public class UserPrincipalManager {
             throw new IllegalStateException("Failed to parse active directory key discovery uri.", e);
         }
     }
+    
+    /**
+     * Create a new {@link UserPrincipalManager} based of the {@link ServiceEndpoints#getAadKeyDiscoveryUri()} and
+     * {@link AADAuthenticationProperties#getEnvironment()}.
+     *
+     * @param serviceEndpointsProps - used to retrieve the JWKS URL
+     * @param aadAuthProps          - used to retrieve the environment.
+     * @param resourceRetriever     - configures the {@link RemoteJWKSet} call.
+     * @param jwkSetCache           - used to cache the JWK set for a finite time, default set to 5 minutes
+     *                                which matches constructor above if no jwkSetCache is passed in
+     */
+    public UserPrincipalManager(ServiceEndpointsProperties serviceEndpointsProps,
+                                AADAuthenticationProperties aadAuthProps,
+                                ResourceRetriever resourceRetriever,
+                                boolean explicitAudienceCheck,
+                                JWKSetCache jwkSetCache) {
+        this.aadAuthProps = aadAuthProps;
+        this.explicitAudienceCheck = explicitAudienceCheck;
+        if (explicitAudienceCheck) {
+            // client-id for "normal" check
+            this.validAudiences.add(this.aadAuthProps.getClientId());
+            // app id uri for client credentials flow (server to server communication)
+            this.validAudiences.add(this.aadAuthProps.getAppIdUri());
+        }
+        try {
+            keySource = new RemoteJWKSet<>(new URL(serviceEndpointsProps
+                    .getServiceEndpoints(aadAuthProps.getEnvironment()).getAadKeyDiscoveryUri()),
+                    resourceRetriever,
+                    jwkSetCache);
+        } catch (MalformedURLException e) {
+            log.error("Failed to parse active directory key discovery uri.", e);
+            throw new IllegalStateException("Failed to parse active directory key discovery uri.", e);
+        }
+    }
 
     public UserPrincipal buildUserPrincipal(String idToken) throws ParseException, JOSEException, BadJOSEException {
         final JWSObject jwsObject = JWSObject.parse(idToken);
@@ -88,6 +129,24 @@ public class UserPrincipalManager {
         verifier.verify(jwtClaimsSet, null);
 
         return new UserPrincipal(jwsObject, jwtClaimsSet);
+    }
+
+    public boolean isTokenIssuedByAAD(String token) {
+        try {
+            final JWT jwt = JWTParser.parse(token);
+            return isAADIssuer(jwt.getJWTClaimsSet().getIssuer());
+        } catch (ParseException e) {
+            log.info("Fail to parse JWT {}, exception {}", token, e);
+        }
+        return false;
+    }
+
+    private static boolean isAADIssuer(String issuer) {
+        if (issuer == null) {
+            return false;
+        }
+        return issuer.startsWith(LOGIN_MICROSOFT_ONLINE_ISSUER) || issuer.startsWith(STS_WINDOWS_ISSUER)
+                || issuer.startsWith(STS_CHINA_CLOUD_API_ISSUER);
     }
 
     private ConfigurableJWTProcessor<SecurityContext> getAadJwtTokenValidator(JWSAlgorithm jwsAlgorithm) {
@@ -103,9 +162,7 @@ public class UserPrincipalManager {
             public void verify(JWTClaimsSet claimsSet, SecurityContext ctx) throws BadJWTException {
                 super.verify(claimsSet, ctx);
                 final String issuer = claimsSet.getIssuer();
-                if (issuer == null || !(issuer.startsWith(LOGIN_MICROSOFT_ONLINE_ISSUER)
-                        || issuer.startsWith(STS_WINDOWS_ISSUER)
-                        || issuer.startsWith(STS_CHINA_CLOUD_API_ISSUER))) {
+                if (!isAADIssuer(issuer)) {
                     throw new BadJWTException("Invalid token issuer");
                 }
                 if (explicitAudienceCheck) {
