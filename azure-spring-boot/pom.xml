@@ -52,6 +52,7 @@
         </dependency>
 
         <dependency>
+  <<<<<<< release/2.3.2
             <groupId>commons-codec</groupId>
             <artifactId>commons-codec</artifactId>
             <optional>true</optional>
@@ -60,6 +61,10 @@
         <dependency>
             <groupId>commons-io</groupId>
             <artifactId>commons-io</artifactId>
+  =======
+            <groupId>org.hibernate.validator</groupId>
+            <artifactId>hibernate-validator</artifactId>
+  >>>>>>> aad-b2c-integration
             <optional>true</optional>
         </dependency>
 

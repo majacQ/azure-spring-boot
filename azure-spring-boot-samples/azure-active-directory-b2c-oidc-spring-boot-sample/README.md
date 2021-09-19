@@ -11,6 +11,7 @@ Please make sure that your b2c application `reply URL` contains `http://localhos
 
 ### Create user flows
 
+  <<<<<<< release/2.3.2
 Follow the guide of [AAD B2C user flows creation](https://docs.microsoft.com/en-us/azure/active-directory-b2c/tutorial-create-user-flows).
 
 ### Configure the sample
@@ -28,12 +29,24 @@ Follow the guide of [AAD B2C user flows creation](https://docs.microsoft.com/en-
     3. Fill in the `${your-password-reset-user-flow}` with the name of `password-reset` user flow.
 4. Replace `${your-reply-url}` to `http://localhost:8080/home`.
 5. Replace `${your-logout-success-url}` to `http://localhost:8080/login`.
+  =======
+Follow the guide of [AAD B2C user flows creation](https://docs.microsoft.com/en-us/azure/active-directory-b2c/active-directory-b2c-tutorials-web-app).
+
+### Configure application.yml
+
+1. Fill in `${your-tenant-name}` and `${your-client-id}` from Azure AD B2C portal `Applications`.
+2. Fill in `${your-policy-name}` and `${your-policy-reply-url}` from the portal `User flows` for each policy.
+3. Replace `${your-logout-success-url}` to `http://localhost:8080/`.
+4. Replace `${your-url-to-process-password-reset}` to `http://localhost:8080/password-reset` if necessary.
+5. Replace `${your-url-to-process-profile-edit}` to `http://localhost:8080/profile-edit` if necessary.
+  >>>>>>> aad-b2c-integration
 
 ```yaml
 azure:
   activedirectory:
     b2c:
       tenant: ${your-tenant-name}
+  <<<<<<< release/2.3.2
       client-id: ${your-client-id}
       client-secret: ${your-client-secret}
       reply-url: ${your-reply-url} # should be absolute url.
@@ -48,6 +61,26 @@ azure:
 1. Fill in the `${your-profile-edit-user-flow}` and `${your-password-reset-user-flow}` from the portal `User flows`.
 Please make sure that these two placeholders should be the same as `application.yml` respectively.
 
+  =======
+      client-id: ${your-application-id}
+      policies:
+        sign-up-or-sign-in: # Required
+          name: ${your-policy-name}
+          reply-url: ${your-policy-reply-url}
+        password-reset:     # Optional
+          name: ${your-policy-name}
+          reply-url: ${your-policy-reply-url}
+        profile-edit:       # Optional
+          name: ${your-policy-name}
+          reply-url: ${your-policy-reply-url}
+
+      # Only absolute URL is supported in following configuration
+      logout-success-url: ${your-logout-success-url}            # Required
+      password-reset-url: ${your-url-to-process-password-reset} # Optional
+      profile-edit-url: ${your-url-to-process-profile-edit}     # Optional
+```
+
+  >>>>>>> aad-b2c-integration
 ### How to run
 
 * Maven 

@@ -18,17 +18,27 @@
         <button class="btn btn-md btn-primary btn-block" type="submit">Log out</button>
     </form>
 
+  <<<<<<< release/2.3.2
     <form style="display:inline" method="get" action="/oauth2/authorization/${your-profile-edit-user-flow}">
         <button class="btn btn-md btn-primary btn-block" type="submit">Profile edit</button>
     </form>
 
     <form style="display:inline" method="get" action="/oauth2/authorization/${your-password-reset-user-flow}">
         <button class="btn btn-md btn-primary btn-block" type="submit">Password reset</button>
+  =======
+    <form style="display:inline" method="get" action="/password-reset">
+        <button class="btn btn-md btn-primary btn-block" type="submit">Password reset</button>
+    </form>
+
+    <form style="display:inline" method="get" action="/profile-edit">
+        <button class="btn btn-md btn-primary btn-block" type="submit">Profile edit</button>
+  >>>>>>> aad-b2c-integration
     </form>
 </div>
 
 <div>
     <br/>
+  <<<<<<< release/2.3.2
     <h2>Azure AD B2C OIDC Login Successfully.</h2>
     <h3>Welcome back <span style="color:cyan" th:text="${name}"></span>!</h3>
     <table border="1">
@@ -56,6 +66,14 @@
         <tr><th>family_name</th><th th:text="${family_name}"></th></tr>
         <tr><th>tfp</th><th th:text="${tfp}"></th></tr>
     </table>
+  =======
+    Hi <span style="font-weight: bold; color: darkred" th:text="${name}"></span>, login successfully.
+    email: <span style="font-weight: bold; color: darkorange" th:text="${email}"></span>,
+    city: <span style="font-weight: bold; color: cyan" th:text="${city}"></span>,
+    country: <span style="font-weight: bold; color: fuchsia" th:text="${country}"></span>.
+    <span style="font-weight: bold; color: purple" th:if="${idProvider!=null}">Login from: </span>
+    <span style="font-weight: bold; color: chartreuse" th:text="${idProvider}" th:if="${idProvider!=null}"></span>
+  >>>>>>> aad-b2c-integration
 </div>
 
 </body>
